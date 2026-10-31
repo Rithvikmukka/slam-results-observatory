@@ -28,9 +28,9 @@ function downloadShared(format){
   if(!sharedSnapshot)return;
   let content,mime;
   if(format==='csv'){
-    const fields=['index','id','algorithm','condition_id','repetition','phase','eligible','fraction','first_eligible_s','memory_peak_mib','native_track_p95_ms','custom_latency_p95_ms','clean_shutdown'];
+    const fields=['index','id','algorithm','condition_id','repetition','phase','eligible','fraction','first_eligible_s','memory_peak_mib','native_track_p95_ms','custom_latency_p95_ms','clean_shutdown','expected_inputs','observed_native_returns','missing_native_observations','maximum_delivery_lateness_s'];
     const cell=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
-    content=[fields.map(cell).join(','),...sharedSnapshot.status.trials.map(t=>fields.map(k=>cell(t[k])).join(','))].join('\r\n');mime='text/csv';
+    content=[fields.map(cell).join(','),...sharedSnapshot.status.trials.map(t=>{const row={...t,...t.failure_summary};return fields.map(k=>cell(row[k])).join(',');})].join('\r\n');mime='text/csv';
   }else{content=JSON.stringify(sharedSnapshot,null,2);mime='application/json';}
   const url=URL.createObjectURL(new Blob([content],{type:mime}));const link=document.createElement('a');
   link.href=url;link.download='shared-slam-results.'+format;link.click();URL.revokeObjectURL(url);
@@ -132,6 +132,7 @@ async function loadRecording(){
 function trialChartsEmpty(message){for(const id of ['trajectoryChart','stateChart','errorChart','headingChart','rpeChart','errorCdfChart','rssChart','cpuChart','durationChart','durationCdfChart','latencyChart','counterChart'])empty(id,message);}
 function plainSummary(data){
   const parts=[],a=data.slot.algorithm,accuracy=data.accuracy;
+  if(data.failure_diagnostics){const f=data.failure_diagnostics;parts.push('This attempt failed validation and remains unscored. '+f.observed_native_returns+' native observations were recorded for '+f.expected_inputs+' inputs; '+f.missing_native_observations+' observations are missing. Maximum delivery delay was '+num(f.maximum_delivery_lateness_s*1000,1)+' ms against a 200 ms limit. These diagnostics do not establish a valid full-run accuracy score.');}
   if(data.slot.development_only)parts.push('This is an earlier development preview, excluded from the formal comparison.');
   if(data.live)parts.push('This native replay is still running. Displayed logs are provisional; final validity and accuracy checks have not finished.');
   if(accuracy){const n=accuracy.eligible_output_samples,total=accuracy.declared_camera_inputs;
@@ -239,9 +240,9 @@ function renderReaderSummary(shared){
   }
   const notes={dvm:'One camera. Its fitted-scale error describes trajectory shape, not native knowledge of metres.',covins:'Stereo cameras and backend. Local tracking output does not certify a globally correct map.',custom:'Stereo plus wheel/gyro and a start prior. Fused predictions do not establish healthy visual tracking.'};
   $('entrySummary').innerHTML=['dvm','covins','custom'].map(a=>{
-    const all=s.trials.filter(t=>t.algorithm===a),done=all.filter(t=>t.phase==='completed'),running=all.filter(t=>t.phase==='running').length;
+    const all=s.trials.filter(t=>t.algorithm===a),done=all.filter(t=>t.phase==='completed'),failed=all.filter(t=>t.phase==='failed').length,running=all.filter(t=>t.phase==='running').length;
     const usable=done.filter(t=>t.eligible!=null&&t.eligible>0).length;
-    return '<article><span class="eyebrow '+a+'">'+a.toUpperCase()+'</span><h3>'+done.length+' / '+all.length+' finalized</h3><p>'+running+' trial'+(running===1?'':'s')+' in progress. '+(done.length?usable+' finalized trial'+(usable===1?'':'s')+' with some eligible '+(a==='custom'?'fused output':'tracking output')+'.':'Waiting for finalized outcomes.')+'</p><p class="caption">'+notes[a]+'</p></article>';
+    return '<article><span class="eyebrow '+a+'">'+a.toUpperCase()+'</span><h3>'+done.length+' validated / '+failed+' failed</h3><p>'+all.length+' planned; '+running+' in progress. '+(done.length?usable+' finalized trial'+(usable===1?'':'s')+' with some eligible '+(a==='custom'?'fused output':'tracking output')+'.':'Waiting for validated outcomes.')+'</p><p class="caption">Validation refers to execution checks, not tracking success. '+notes[a]+'</p></article>';
   }).join('');
 }
 
