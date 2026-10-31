@@ -6,7 +6,7 @@ const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const num=(v,n=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(n);
 let state=null,currentRecording=null,currentTrial=null,latestAudit=null,busy=false;
 
-let sharedSnapshot=null,sharedFetched=0;
+let sharedSnapshot=null,sharedFetched=0,lastRenderedPublication=null;
 const FEED_URL='https://raw.githubusercontent.com/Rithvikmukka/slam-results-observatory/live-data/live.json';
 async function loadSharedSnapshot(force=false){
   if(!force&&sharedSnapshot&&Date.now()-sharedFetched<55000)return sharedSnapshot;
@@ -84,7 +84,7 @@ function renderStatus(s){
   state=s;const terminal=!['running','starting'].includes(s.phase),stale=!terminal&&s.heartbeat_age_s>30;
   $('liveBadge').textContent=terminal?s.phase:stale?'Queue heartbeat stale':'Queue heartbeat fresh';$('liveBadge').className='badge'+(s.phase==='stopped_failed'?' bad':stale?' warn':'');
   $('updated').textContent='Queue update '+new Date(s.updated_utc).toLocaleTimeString();$('phase').textContent=s.phase;
-  stats('stats',[[s.counts.completed+' / '+s.trials.length,'Trials with qualified execution'],[s.counts.running,'Native trials active'],[s.counts.failed,'Failed trial slots'],[s.recordings_registered+' / '+s.cases.length,'Shared recordings registered'],[s.recording?num(s.recording.time/60,1)+' min':'—','Current capture simulator time'],[num(s.heartbeat_age_s,0)+' s','Queue heartbeat age']]);
+  stats('stats',[[s.counts.completed+' / '+s.trials.length,'Finalized trials (not tracking passes)'],[s.counts.running,'Trials in progress'],[s.counts.failed,'Failed trial slots'],[s.recordings_registered+' / '+s.cases.length,'Shared recordings registered'],[s.recording?num(s.recording.time/60,1)+' min':'—','Current capture simulator time'],[num(s.heartbeat_age_s,0)+' s','Queue heartbeat age']]);
   $('progressBar').style.width=(100*(s.counts.completed+s.counts.failed)/Math.max(s.trials.length,1))+'%';$('active').textContent=s.error||s.active_stage||'No active stage';
   if(s.recording)$('active').textContent+=' · '+s.recording.frames+' saved stereo pairs · '+num(s.recording.payload_bytes/1e9,3)+' GB current image payload';
   $('schedule').innerHTML=['dvm','covins','custom'].map(a=>'<div class="schedule-row"><strong class="'+a+'">'+a.toUpperCase()+'</strong>'+s.trials.filter(t=>t.algorithm===a).map(t=>'<button class="slot '+t.phase+'" data-trial="'+t.index+'" title="'+esc(t.id+' · '+t.phase)+'" aria-label="'+esc(t.id+' '+t.phase)+'"></button>').join('')+'</div>').join('');
@@ -201,10 +201,11 @@ function renderChecks(){
 
 
 async function refresh(){if(busy)return;busy=true;$('refresh').disabled=true;try{
-  $('error').hidden=true;await loadSharedSnapshot(true);renderStatus(await api('/api/status'));
-  await loadRecording();await loadTrial();latestAudit=sharedSnapshot.audit;renderChecks();
-  const age=Math.max(0,(Date.now()-Date.parse(sharedSnapshot.generated_utc))/1000),terminal=!['running','starting'].includes(state.phase),sourceStale=state.heartbeat_age_s>900;
-  $('liveBadge').textContent=terminal?state.phase:sourceStale?'Source queue heartbeat stale':age>900?'Shared snapshot stale':'Shared snapshot / updates about every 5 min';
+  $('error').hidden=true;await loadSharedSnapshot(true);
+  if(lastRenderedPublication!==sharedSnapshot.generated_utc){renderStatus(await api('/api/status'));await loadRecording();await loadTrial();latestAudit=sharedSnapshot.audit;renderChecks();lastRenderedPublication=sharedSnapshot.generated_utc;}
+  renderReaderSummary(sharedSnapshot);
+  const age=Math.max(0,(Date.now()-Date.parse(sharedSnapshot.generated_utc))/1000),terminal=!['running','starting'].includes(state.phase),sourceStale=(Date.now()-Date.parse(state.updated_utc))/1000>900;
+  $('liveBadge').textContent=terminal?state.phase:age>900?'Shared snapshot stale':sourceStale?'Source queue heartbeat stale':'Shared snapshot / updates about every 5 min';
   $('liveBadge').className='badge'+(!terminal&&(age>900||sourceStale)?' warn':'');
   $('updated').textContent='Published '+new Date(sharedSnapshot.generated_utc).toLocaleString()+' | queue update '+new Date(state.updated_utc).toLocaleString();
   $('exportStatus').textContent='Read-only shared snapshot. Last publication '+new Date(sharedSnapshot.generated_utc).toLocaleString()+'. Backend stays on the owner\'s laptop. Download contains only the public projection.';
@@ -215,4 +216,30 @@ $('caseSelect').addEventListener('change',()=>loadRecording().catch(showError));
 function showError(error){$('error').textContent=error.message;$('error').hidden=false;}
 $('export').addEventListener('click',()=>downloadShared('json'));
 $('publicCsv').addEventListener('click',()=>downloadShared('csv'));
+
+function renderReaderSummary(shared){
+  const s=shared.status,c=s.counts,total=s.trials.length,active=s.trials.find(t=>t.phase==='running');
+  const age=Math.max(0,(Date.now()-Date.parse(shared.generated_utc))/60000);
+  if(s.phase==='stopped_failed'){
+    $('readerNow').textContent='The study stopped for review.';
+    $('readerNext').textContent=c.completed+' of '+total+' trials finalized; '+c.pending+' remain pending. A stopped or pending trial does not count as a successful result.';
+  }else if(s.phase==='completed_with_scope_limitations'){
+    $('readerNow').textContent='The scheduled trial sequence has finished.';
+    $('readerNext').textContent=shared.audit?.final_evidence_audit_pass===true?'The matching independent evidence audit passed. The sensor, scale and mapping limitations still apply.':'The independent audit is pending or needs review. Completed trials and an audited final comparison are separate milestones.';
+  }else if(active){
+    const condition=s.cases.find(item=>item.id===active.condition_id);
+    $('readerNow').textContent=active.algorithm.toUpperCase()+' trial underway / '+(condition?condition.duration_seconds/60+'-minute input':'registered input')+' / repeat '+active.repetition;
+    $('readerNext').textContent=c.completed+' of '+total+' trials finalized. This trial may be checking input, starting, replaying or evaluating. Its accuracy enters the comparison only after the required gates finish. Published '+num(age,0)+' minutes ago.';
+  }else{
+    $('readerNow').textContent='Preparing or checking the next shared input.';
+    $('readerNext').textContent=c.completed+' of '+total+' trials finalized. Data preparation is part of the study; it is not an algorithm result. Published '+num(age,0)+' minutes ago.';
+  }
+  const notes={dvm:'One camera. Its fitted-scale error describes trajectory shape, not native knowledge of metres.',covins:'Stereo cameras and backend. Local tracking output does not certify a globally correct map.',custom:'Stereo plus wheel/gyro and a start prior. Fused predictions do not establish healthy visual tracking.'};
+  $('entrySummary').innerHTML=['dvm','covins','custom'].map(a=>{
+    const all=s.trials.filter(t=>t.algorithm===a),done=all.filter(t=>t.phase==='completed'),running=all.filter(t=>t.phase==='running').length;
+    const usable=done.filter(t=>t.eligible!=null&&t.eligible>0).length;
+    return '<article><span class="eyebrow '+a+'">'+a.toUpperCase()+'</span><h3>'+done.length+' / '+all.length+' finalized</h3><p>'+running+' trial'+(running===1?'':'s')+' in progress. '+(done.length?usable+' finalized trial'+(usable===1?'':'s')+' with some eligible '+(a==='custom'?'fused output':'tracking output')+'.':'Waiting for finalized outcomes.')+'</p><p class="caption">'+notes[a]+'</p></article>';
+  }).join('');
+}
+
 refresh();setInterval(()=>{if(!document.hidden)refresh();},60000);
