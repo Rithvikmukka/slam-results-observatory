@@ -88,16 +88,18 @@ function renderStatus(s){
   $('progressBar').style.width=(100*(s.counts.completed+s.counts.failed)/Math.max(s.trials.length,1))+'%';$('active').textContent=s.error||s.active_stage||'No active stage';
   if(s.recording)$('active').textContent+=' · '+s.recording.frames+' saved stereo pairs · '+num(s.recording.payload_bytes/1e9,3)+' GB current image payload';
   $('schedule').innerHTML=['dvm','covins','custom'].map(a=>'<div class="schedule-row"><strong class="'+a+'">'+a.toUpperCase()+'</strong>'+s.trials.filter(t=>t.algorithm===a).map(t=>'<button class="slot '+t.phase+'" data-trial="'+t.index+'" title="'+esc(t.id+' · '+t.phase)+'" aria-label="'+esc(t.id+' '+t.phase)+'"></button>').join('')+'</div>').join('');
-  $('schedule').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{const choice=[...$('trialSelect').options].find(o=>o.value===b.dataset.trial);if(choice){$('trialSelect').value=b.dataset.trial;loadTrial();location.hash='trial';}}));
-  fillOptions('caseSelect',[['active','Shared input context (private raw data)'],...s.cases.map(c=>[c.id,c.id+' / '+c.duration_seconds/60+' min'])]);
-  fillOptions('filterCase',[['all','All conditions (exploratory; mixed durations)'],...s.cases.map(c=>[c.id,c.id+' / '+c.duration_seconds/60+' min'])]);
+  $('schedule').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{const choice=[...$('trialSelect').options].find(o=>o.value===b.dataset.trial);if(choice){$('trialSelect').dataset.followActive='false';$('trialSelect').value=b.dataset.trial;loadTrial();location.hash='trial';}}));
+  fillOptions('caseSelect',[['active','Shared input context (private raw data)'],...s.cases.map(c=>[c.id,(c.label||c.id)+' / '+c.duration_seconds/60+' min'])]);
+  fillOptions('filterCase',[['all','All conditions (exploratory; mixed durations)'],...s.cases.map(c=>[c.id,(c.label||c.id)+' / '+c.duration_seconds/60+' min'])]);
   if(!$('filterCase').dataset.initialized){$('filterCase').value=s.trials[0]?.condition_id||'all';$('filterCase').dataset.initialized='true';}
   const candidates=s.trials.filter(t=>t.phase==='completed'||t.phase==='running'||t.phase==='failed');
   fillOptions('trialSelect',[['','Select a shared formal trial'],...candidates.map(t=>[t.index,t.id+' / '+t.phase])]);
+  if($('trialSelect').dataset.followActive!=='false'){const preferred=s.trials.find(t=>t.phase==='running')||s.trials.filter(t=>t.phase==='completed').slice(-1)[0];if(preferred)$('trialSelect').value=String(preferred.index);}
   renderComparisons();renderChecks();
 }
 
 function renderComparisons(){
+  if(state){const id=$('filterCase').value,selected=state.trials.filter(t=>id==='all'||t.condition_id===id),done=selected.filter(t=>t.phase==='completed'),active=selected.filter(t=>t.phase==='running').length;$('comparisonContext').textContent=(id==='all'?'Exploratory view across mixed conditions. ':'Matching condition selected. ')+done.length+' of '+selected.length+' trials finalized; '+active+' in progress. '+(done.length?'Read availability before error; missing scores remain unavailable.':'Comparison dots appear after trials finalize. Explore the current trial while waiting.');}
   if(!state)return;const trials=chosenCases(),completed=trials.filter(t=>t.phase==='completed');
   const lines=(key,filter=()=>true)=>['dvm','covins','custom'].map((algorithm,i)=>({name:algorithm.toUpperCase(),color:C[algorithm],scatter:true,data:completed.filter(t=>t.algorithm===algorithm&&filter(t)&&t[key]!=null).map((t,j)=>[i+1+((j%3)-1)*.1,t[key],t.id])}));
   const common={xlabel:'Entry (1 DVM · 2 COVINS · 3 Custom)',zero:true,xmin:.5,xmax:3.5};
@@ -111,7 +113,7 @@ function renderComparisons(){
   const range=(values,n=3)=>{const finite=values.filter(v=>v!=null&&Number.isFinite(v));return finite.length?num(Math.min(...finite),n)+'–'+num(Math.max(...finite),n):'unavailable';};
   let html='';
   for(const c of state.cases){if($('filterCase').value!=='all'&&$('filterCase').value!==c.id)continue;for(const a of ['dvm','covins','custom']){const selected=trials.filter(t=>t.condition_id===c.id&&t.algorithm===a),done=selected.filter(t=>t.phase==='completed'),failed=selected.filter(t=>t.phase==='failed').length;
-    html+='<tr><td>'+esc(c.id)+'<small class="'+a+'">'+a.toUpperCase()+(a==='custom'?' · fused, visual unknown':a==='dvm'?' · monocular shape':' · metric stereo')+'</small></td><td>'+done.length+' / '+selected.length+(failed?'<small>'+failed+' failed</small>':'')+'</td><td>'+range(done.map(t=>t.fraction))+'</td><td>'+done.filter(t=>t.eligible===0).length+'</td><td>'+range(done.flatMap(t=>t.epoch_errors||[]),4)+'</td><td>'+range(done.map(t=>t.memory_peak_mib),1)+'</td><td>'+done.filter(t=>t.clean_shutdown===true).length+' / '+done.length+'</td></tr>';}}
+    html+='<tr><td>'+esc(c.label||c.id)+'<small class="'+a+'">'+a.toUpperCase()+(a==='custom'?' · fused, visual unknown':a==='dvm'?' · monocular shape':' · metric stereo')+'</small></td><td>'+done.length+' / '+selected.length+(failed?'<small>'+failed+' failed</small>':'')+'</td><td>'+range(done.map(t=>t.fraction))+'</td><td>'+done.filter(t=>t.eligible===0).length+'</td><td>'+range(done.flatMap(t=>t.epoch_errors||[]),4)+'</td><td>'+range(done.map(t=>t.memory_peak_mib),1)+'</td><td>'+done.filter(t=>t.clean_shutdown===true).length+' / '+done.length+'</td></tr>';}}
   $('comparisonTable').querySelector('tbody').innerHTML=html;
 }
 
@@ -212,7 +214,8 @@ async function refresh(){if(busy)return;busy=true;$('refresh').disabled=true;try
   $('bundleDownload').hidden=true;
 }catch(error){$('error').textContent=error.message+'. Last displayed results may be stale; this public page cannot start or change experiments.';$('error').hidden=false;}finally{busy=false;$('refresh').disabled=false;}}
 $('refresh').addEventListener('click',refresh);$('filterCase').addEventListener('change',renderComparisons);
-$('caseSelect').addEventListener('change',()=>loadRecording().catch(showError));$('trialSelect').addEventListener('change',()=>loadTrial().catch(showError));
+$('caseSelect').addEventListener('change',()=>loadRecording().catch(showError));$('trialSelect').addEventListener('change',()=>{$('trialSelect').dataset.followActive='false';loadTrial().catch(showError);});
+$('followTrial').addEventListener('click',()=>{$('trialSelect').dataset.followActive='true';if(state){renderStatus(state);loadTrial().catch(showError);}});
 function showError(error){$('error').textContent=error.message;$('error').hidden=false;}
 $('export').addEventListener('click',()=>downloadShared('json'));
 $('publicCsv').addEventListener('click',()=>downloadShared('csv'));
