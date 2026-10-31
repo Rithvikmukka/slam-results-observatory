@@ -5,7 +5,37 @@ const palette=[C.dvm,C.covins,C.custom,C.purple,C.red,'#74d7e5'];
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const num=(v,n=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(n);
 let state=null,currentRecording=null,currentTrial=null,latestAudit=null,busy=false;
-async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw new Error(d.error||r.statusText);return d;}
+
+let sharedSnapshot=null,sharedFetched=0;
+const FEED_URL='https://raw.githubusercontent.com/Rithvikmukka/slam-results-observatory/live-data/live.json';
+async function loadSharedSnapshot(force=false){
+  if(!force&&sharedSnapshot&&Date.now()-sharedFetched<55000)return sharedSnapshot;
+  const response=await fetch(FEED_URL+'?minute='+Math.floor(Date.now()/60000),{cache:'no-store'});
+  if(!response.ok)throw new Error('Shared results feed unavailable (HTTP '+response.status+')');
+  const data=await response.json();if(data.schema!=='shared-slam-dashboard-v1')throw new Error('Unknown results format');
+  sharedSnapshot=data;sharedFetched=Date.now();return data;
+}
+async function api(path,options){
+  if(options?.method&&options.method!=='GET')throw new Error('Public view has no control or export endpoints');
+  const shared=await loadSharedSnapshot(),url=new URL(path,'https://dashboard.invalid');
+  if(url.pathname==='/api/status')return {...shared.status,heartbeat_age_s:Math.max(0,(Date.now()-Date.parse(shared.status.updated_utc))/1000)};
+  if(url.pathname==='/api/trial')return shared.trials[url.searchParams.get('index')]||{available:false,reason:'No shared detail for this trial'};
+  if(url.pathname==='/api/recording')return {available:false,reason:'Raw input footage, floor maps and sensor recordings remain private on the research laptop.'};
+  if(url.pathname==='/api/export-status')return {audit:shared.audit,current_queue:false,phase:'not_generated'};
+  throw new Error('Not part of the public results projection');
+}
+function downloadShared(format){
+  if(!sharedSnapshot)return;
+  let content,mime;
+  if(format==='csv'){
+    const fields=['index','id','algorithm','condition_id','repetition','phase','eligible','fraction','first_eligible_s','memory_peak_mib','native_track_p95_ms','custom_latency_p95_ms','clean_shutdown'];
+    const cell=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+    content=[fields.map(cell).join(','),...sharedSnapshot.status.trials.map(t=>fields.map(k=>cell(t[k])).join(','))].join('\r\n');mime='text/csv';
+  }else{content=JSON.stringify(sharedSnapshot,null,2);mime='application/json';}
+  const url=URL.createObjectURL(new Blob([content],{type:mime}));const link=document.createElement('a');
+  link.href=url;link.download='shared-slam-results.'+format;link.click();URL.revokeObjectURL(url);
+}
+
 function empty(id,message='No qualified data available yet.'){ $(id).innerHTML='<div class="empty">'+esc(message)+'</div>'; }
 function stats(id,items){$(id).innerHTML=items.map(([v,label])=>'<div class="stat"><b>'+esc(v)+'</b><span>'+esc(label)+'</span></div>').join('');}
 function chosenCases(){return state.trials.filter(t=>$('filterCase').value==='all'||t.condition_id===$('filterCase').value);}
@@ -59,10 +89,11 @@ function renderStatus(s){
   if(s.recording)$('active').textContent+=' · '+s.recording.frames+' saved stereo pairs · '+num(s.recording.payload_bytes/1e9,3)+' GB current image payload';
   $('schedule').innerHTML=['dvm','covins','custom'].map(a=>'<div class="schedule-row"><strong class="'+a+'">'+a.toUpperCase()+'</strong>'+s.trials.filter(t=>t.algorithm===a).map(t=>'<button class="slot '+t.phase+'" data-trial="'+t.index+'" title="'+esc(t.id+' · '+t.phase)+'" aria-label="'+esc(t.id+' '+t.phase)+'"></button>').join('')+'</div>').join('');
   $('schedule').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{const choice=[...$('trialSelect').options].find(o=>o.value===b.dataset.trial);if(choice){$('trialSelect').value=b.dataset.trial;loadTrial();location.hash='trial';}}));
-  fillOptions('caseSelect',[['active','Follow active input'],...s.cases.map(c=>[c.id,c.id+' · '+c.duration_seconds/60+' min']),['development','DEVELOPMENT ONLY · shared120 s input']]);
-  fillOptions('filterCase',[['all','All conditions'],...s.cases.map(c=>[c.id,c.id])]);
+  fillOptions('caseSelect',[['active','Shared input context (private raw data)'],...s.cases.map(c=>[c.id,c.id+' / '+c.duration_seconds/60+' min'])]);
+  fillOptions('filterCase',[['all','All conditions (exploratory; mixed durations)'],...s.cases.map(c=>[c.id,c.id+' / '+c.duration_seconds/60+' min'])]);
+  if(!$('filterCase').dataset.initialized){$('filterCase').value=s.trials[0]?.condition_id||'all';$('filterCase').dataset.initialized='true';}
   const candidates=s.trials.filter(t=>t.phase==='completed'||t.phase==='running'||t.phase==='failed');
-  fillOptions('trialSelect',[['','Select a formal trial or separate development preview'],...candidates.map(t=>[t.index,t.algorithm.toUpperCase()+' / '+t.condition_id+' / repeat'+t.repetition+' / '+t.phase]),...['dvm','covins','custom'].map(a=>['dev-'+a,'DEVELOPMENT ONLY / '+a.toUpperCase()+' / shared120 s'])]);
+  fillOptions('trialSelect',[['','Select a shared formal trial'],...candidates.map(t=>[t.index,t.id+' / '+t.phase])]);
   renderComparisons();renderChecks();
 }
 
@@ -89,7 +120,7 @@ async function loadRecording(){
   if(!data.available){$('recordStatus').textContent=data.reason;$('motionStats').innerHTML='';for(const id of ['pathChart','coverageChart','speedChart','turnChart'])empty(id,data.reason);for(const type of ['map','camera']){$(type+'Image').hidden=true;$(type+'Placeholder').hidden=false;}return;}
   const m=data.motion,c=data.coverage;$('recordStatus').textContent=(data.complete?'Complete input':'Live capture (provisional appended records)')+' · '+num(data.last_input_s,1)+' s · '+data.samples+' control samples · '+data.camera_timestamp_note;
   stats('motionStats',[[num(m.distance_m,2)+' m','Reference travelled distance'],[num(c.unique_area_m2,3)+' m²','Unique body-footprint visitation'],[num(c.reference_floor_percent,4)+'%','Of reference free floor · not map coverage'],[num(m.stationary_fraction*100,1)+'%','Ticks nearly stationary (<0.005m/s)'],[num(m.turning_fraction*100,1)+'%','Ticks turning (|yaw rate|>0.05rad/s)']]);
-  chart('pathChart',[{name:'Common reference path',color:C.reference,data:m.reference_path.map(p=>[p[1],p[2]])}],{equal:true,xlabel:'World x (m)',ylabel:'World y (m)'});
+  chart('pathChart',[{name:'Common reference path',color:C.reference,data:m.reference_path.map(p=>[p[1],p[2]])}],{equal:true,xlabel:'Relative x (m)',ylabel:'Relative y (m)'});
   chart('coverageChart',[{name:'Unique reference footprint area',color:C.custom,data:c.curve}],{ylabel:'Visited reference floor (m²)',zero:true});
   chart('speedChart',[{name:'Reference |velocity|',color:C.reference,data:m.reference_speed},{name:'Wheel forward velocity',color:C.dvm,data:m.wheel_speed},{name:'Commanded linear velocity',color:C.covins,data:m.commanded_speed}],{ylabel:'Speed (m/s)'});
   chart('turnChart',[{name:'Reference yaw rate',color:C.reference,data:m.reference_yaw_rate},{name:'Gyro z',color:C.custom,data:m.gyro_z},{name:'Commanded yaw rate',color:C.covins,data:m.commanded_yaw_rate}],{ylabel:'Yaw rate (rad/s)'});
@@ -116,16 +147,26 @@ function plainSummary(data){
   }else parts.push('A comparable verified native occupancy map is unavailable for this trial. Accurate poses alone cannot establish map completeness.');
   return parts.join(' ');
 }
+function renderObservations(data){
+  const o=data?.observations;
+  if(!o){$('inputAccounting').textContent='Choose a trial with retained native evidence.';$('stateAccounting').textContent='State support is unavailable.';return;}
+  const a=o.accounting,s=o.states,value=v=>v==null?'unavailable':String(v);
+  $('inputAccounting').textContent='Expected camera samples: '+value(a.expected_camera_samples)+'; delivered: '+value(a.delivered_camera_samples)+'; processed camera samples: '+value(a.processed_camera_samples)+'; eligible '+(data.slot.algorithm==='custom'?'fused camera-grid outputs (different basis)':'camera-grid outputs')+': '+value(a.eligible_camera_samples)+'. Processing boundary verified: '+value(a.processing_boundary_verified)+'.'+
+    (data.slot.algorithm==='custom'?' Calibration-history image omissions: '+value(a.calibration_history_omissions)+'; delayed images pending: '+value(a.delayed_camera_samples_pending)+'. Fused sensor-tick predictions are separate from camera processing.':' Native returns observed: '+value(a.observed_native_returns)+'.')+
+    ' Delivery lateness max / p95: '+(a.delivery_max_lateness_s==null?'unavailable':num(a.delivery_max_lateness_s*1000,2))+' / '+(a.delivery_p95_lateness_s==null?'unavailable':num(a.delivery_p95_lateness_s*1000,2))+' ms. '+a.scope;
+  $('stateAccounting').textContent=(data.live?'PROVISIONAL / ':'')+'Sample counts: '+JSON.stringify(s.sample_counts)+'. Approximate seconds by state: '+JSON.stringify(Object.fromEntries(Object.entries(s.approximate_seconds).map(([k,v])=>[k,Number(v.toFixed(3))])))+'. Unobserved/boundary seconds: '+num(s.unobserved_seconds,3)+'. Longest gap without observed eligible output: '+num(s.longest_no_observed_eligible_output_gap_s,3)+' s. Map identity transitions: '+value(s.map_identity_transitions)+'. '+s.scope+' Visual health: '+s.visual_tracking_health+'.';
+}
 async function loadTrial(){
   const index=$('trialSelect').value;
-  if(index===''){trialChartsEmpty('Choose a formal trial when available, or a labelled development preview.');currentTrial=null;$('plainSummary').textContent='Select a trial to see a plain-language interpretation. Formal results stay pending until execution and evaluation are complete.';return;}
+  if(index===''){trialChartsEmpty('Choose a formal trial when available, or a labelled development preview.');currentTrial=null;renderObservations(null);$('plainSummary').textContent='Select a trial to see a plain-language interpretation. Formal results stay pending until execution and evaluation are complete.';return;}
   const data=await api('/api/trial?index='+encodeURIComponent(index));currentTrial=data;
+  renderObservations(data);
   if(!data.available){$('trialInfo').textContent=data.reason;trialChartsEmpty(data.reason);return;}
   const a=data.slot.algorithm,epochs=(data.epochs||[]).filter(e=>e.available),r=data.resources;
   $('plainSummary').textContent=plainSummary(data);
-  $('trialInfo').textContent=data.slot.id+' · '+(data.slot.development_only?'DEVELOPMENT DATA · EXCLUDED FROM FORMAL COMPARISON':data.live?'LIVE / provisional logs':'completed formal execution')+' · '+data.validity;
+  $('trialInfo').textContent=data.slot.id+' · '+(data.slot.development_only?'DEVELOPMENT DATA · EXCLUDED FROM FORMAL COMPARISON':data.live?'LIVE / provisional logs':data.slot.phase==='completed'?'completed formal execution':'incomplete / retained evidence')+' · '+data.validity;
   stats('trialStats',[[data.native_rows,'Recorded native rows'],[data.accuracy?num(data.accuracy.eligible_output_fraction*100,2)+'%':'pending','Eligible camera-grid samples'],[num(r.sampled_native_peak_rss_mib,1)+' MiB','Sampled native peak RSS'],[num(r.sampled_native_cpu_seconds,1)+' s','Sampled native cumulative CPU'],[epochs.length,'Scored coordinate epochs'],[epochs.length?epochs.every(e=>e.independent_ape_matches)?'Agrees':'CHECK':'pending','Independent scalar APE arithmetic']]);
-  chart('trajectoryChart',epochs.flatMap((e,i)=>[{name:'Reference epoch'+e.epoch,color:palette[i%palette.length],data:e.reference.map(p=>[p[1],p[2]])},{name:'Estimate epoch'+e.epoch+' n='+e.rows,color:palette[i%palette.length],dash:true,data:e.estimate.map(p=>[p[1],p[2]])}]),{equal:true,xlabel:'World x (m)',ylabel:'World y (m)',empty:data.live?'Aligned trajectories appear after completed input/execution gates.':'No eligible trajectory with supported scale/alignment.'});
+  chart('trajectoryChart',epochs.flatMap((e,i)=>[{name:'Reference epoch'+e.epoch,color:palette[i%palette.length],data:e.reference.map(p=>[p[1],p[2]])},{name:'Estimate epoch'+e.epoch+' n='+e.rows,color:palette[i%palette.length],dash:true,data:e.estimate.map(p=>[p[1],p[2]])}]),{equal:true,xlabel:'Relative x (m)',ylabel:'Relative y (m)',empty:data.live?'Aligned trajectories appear after completed input/execution gates.':'No eligible trajectory with supported scale/alignment.'});
   stateChart(data.state_intervals||[]);
   const epochLines=key=>epochs.map((e,i)=>({name:'Epoch'+e.epoch+' / map'+e.map_id+' / n='+e.rows,color:palette[i%palette.length],data:e[key]}));
   chart('errorChart',epochLines('ape_m'),{ylabel:'Epoch-local XY error (m)',zero:true});chart('headingChart',epochLines('heading_deg'),{ylabel:'Heading residual (degrees)',zero:true});
@@ -145,10 +186,10 @@ async function loadTrial(){
 }
 
 function renderChecks(){
-  if(!state)return;const t=currentTrial,checks=[
+  if(!state)return;const t=currentTrial,audit=latestAudit?.queue===state.queue?latestAudit:null,checks=[
     ['Frozen plan hash',state.plan_hash_verified?'Verified':'Mismatch',state.plan_hash_verified?'good':'bad'],
     ['Pinned helper hashes',state.all_pinned_tools_unchanged?'Unchanged':'Mismatch / review required',state.all_pinned_tools_unchanged?'good':'bad'],
-    ['Final independent study audit',latestAudit?.phase==='failed'?'Audit failed: '+latestAudit.error:latestAudit?.final_evidence_audit_pass===true?'Complete study evidence checks passed; mapping scope limits remain':latestAudit?.final_evidence_audit_pass===false?'Evidence mismatch: investigate':'Pending full study and post-run audit',latestAudit?.final_evidence_audit_pass===true?'good':latestAudit?.phase==='failed'||latestAudit?.final_evidence_audit_pass===false?'bad':''],
+    ['Final independent study audit',audit?.phase==='failed'?'Audit failed: '+audit.error:audit?.final_evidence_audit_pass===true?'Complete study evidence checks passed; mapping scope limits remain':audit?.final_evidence_audit_pass===false?'Evidence mismatch: investigate':'Pending current study and matching post-run audit',audit?.final_evidence_audit_pass===true?'good':audit?.phase==='failed'||audit?.final_evidence_audit_pass===false?'bad':''],
     ['Original source receipts',t?.integrity?.source_receipts_equal===true?'Selected trial before/after agree':'Pending selected completed trial',t?.integrity?.source_receipts_equal===true?'good':''],
     ['Evaluation evidence receipts',t?.integrity?.evaluation_before_after_equal===true?'Selected trial before/after agree':'Pending or unavailable',t?.integrity?.evaluation_before_after_equal===true?'good':''],
     ['Independent metric arithmetic',t?.epochs?.some(e=>e.available)?t.epochs.filter(e=>e.available).every(e=>e.independent_primary_metric_pass)?'Primary APE/RPE/support checks agree':'Mismatch or unavailable: investigate':'Pending usable pose support',t?.epochs?.some(e=>e.available)&&t.epochs.filter(e=>e.available).every(e=>e.independent_primary_metric_pass)?'good':''],
@@ -158,21 +199,20 @@ function renderChecks(){
   $('confidenceChecks').innerHTML=checks.map(([title,value,cls])=>'<div class="check '+cls+'"><strong>'+esc(title)+'</strong><span>'+esc(value)+'</span></div>').join('');
 }
 
-async function refresh(){if(busy)return;busy=true;$('refresh').disabled=true;try{$('error').hidden=true;renderStatus(await api('/api/status'));await loadRecording();await loadTrial();const status=await api('/api/export-status');latestAudit=status.audit;renderChecks();if(status.phase!=='not_generated')$('exportStatus').textContent='Report snapshot: '+status.phase+(status.finished_utc?' · '+new Date(status.finished_utc).toLocaleString():'')+(status.error?' · '+status.error:'');}catch(error){$('error').textContent='Viewer read failed: '+error.message+'. The benchmark runner is separate and has not been changed.';$('error').hidden=false;}finally{busy=false;$('refresh').disabled=false;}}
+
+async function refresh(){if(busy)return;busy=true;$('refresh').disabled=true;try{
+  $('error').hidden=true;await loadSharedSnapshot(true);renderStatus(await api('/api/status'));
+  await loadRecording();await loadTrial();latestAudit=sharedSnapshot.audit;renderChecks();
+  const age=Math.max(0,(Date.now()-Date.parse(sharedSnapshot.generated_utc))/1000),terminal=!['running','starting'].includes(state.phase),sourceStale=state.heartbeat_age_s>900;
+  $('liveBadge').textContent=terminal?state.phase:sourceStale?'Source queue heartbeat stale':age>900?'Shared snapshot stale':'Shared snapshot / updates about every 5 min';
+  $('liveBadge').className='badge'+(!terminal&&(age>900||sourceStale)?' warn':'');
+  $('updated').textContent='Published '+new Date(sharedSnapshot.generated_utc).toLocaleString()+' | queue update '+new Date(state.updated_utc).toLocaleString();
+  $('exportStatus').textContent='Read-only shared snapshot. Last publication '+new Date(sharedSnapshot.generated_utc).toLocaleString()+'. Backend stays on the owner\'s laptop. Download contains only the public projection.';
+  $('bundleDownload').hidden=true;
+}catch(error){$('error').textContent=error.message+'. Last displayed results may be stale; this public page cannot start or change experiments.';$('error').hidden=false;}finally{busy=false;$('refresh').disabled=false;}}
 $('refresh').addEventListener('click',refresh);$('filterCase').addEventListener('change',renderComparisons);
 $('caseSelect').addEventListener('change',()=>loadRecording().catch(showError));$('trialSelect').addEventListener('change',()=>loadTrial().catch(showError));
 function showError(error){$('error').textContent=error.message;$('error').hidden=false;}
-$('export').addEventListener('click',async()=>{try{await api('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case:$('caseSelect').value,trial:$('trialSelect').value===''?null:$('trialSelect').value})});$('exportStatus').textContent='Export started at lower priority. A timestamped report snapshot will be retained.';}catch(error){showError(error);}});
-// Hosted frontend only: never point visitors at their own localhost or publish private evidence.
-$('liveBadge').textContent='Frontend online · backend disconnected';
-$('liveBadge').className='badge warn';
-$('updated').textContent='No live laptop connection configured';
-$('phase').textContent='Awaiting secure results connection';
-$('active').textContent='This is the complete hosted interface. Live results, camera/map images and downloads require a separately configured secure laptop-backend connection.';
-stats('stats',[['Not connected','Live results'],['Pending','Trial progress'],['Unavailable','Live metrics']]);
-document.querySelectorAll('.plot').forEach(node=>empty(node.id,'No results connection yet. No measurements are being fabricated.'));
-$('refresh').disabled=true;$('export').disabled=true;
-$('exportStatus').textContent='Report export is available in the local dashboard. Hosted downloads will work after a secure results backend is connected.';
-document.querySelector('.downloads').parentElement.querySelector('.caption').textContent='Public frontend only. The laptop backend is not connected or exposed. Reports and live results remain unavailable until a secure results connection is configured. This page cannot control experiments.';
-document.querySelector('footer').textContent='SLAM Observatory / public frontend / live backend connection not configured';
-document.querySelectorAll('.downloads a').forEach(link=>{link.removeAttribute('href');link.setAttribute('aria-disabled','true');link.title='Available after the secure results backend is connected';});
+$('export').addEventListener('click',()=>downloadShared('json'));
+$('publicCsv').addEventListener('click',()=>downloadShared('csv'));
+refresh();setInterval(()=>{if(!document.hidden)refresh();},60000);
