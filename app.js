@@ -247,3 +247,17 @@ function renderReaderSummary(shared){
 }
 
 refresh();setInterval(()=>{if(!document.hidden)refresh();},60000);
+// Current-stage public projection. No private backend URLs or configuration values.
+(function(){
+let lastCurrent=null;const byId=id=>document.getElementById(id),fmt=n=>Number(n).toLocaleString(undefined,{maximumFractionDigits:1});
+async function current(){try{const snap=await loadSharedSnapshot(),s=snap.current_endurance;if(!s){byId('enduranceStatus').textContent='Current-run snapshot not published yet.';return;}lastCurrent=s;
+const age=Math.max(0,(Date.now()-Date.parse(snap.generated_utc))/1000);byId('enduranceStatus').textContent=s.label+(age>900?' · publication stale':'');byId('enduranceProgress').value=s.progress_fraction;byId('enduranceTime').textContent=fmt(s.recorded_simulation_seconds/60)+' / '+fmt(s.duration_seconds/60)+' simulated minutes';
+byId('enduranceAgents').replaceChildren(...s.agents.map(a=>{const p=document.createElement('p');p.textContent=a.label+': '+fmt(a.stored_stereo_pairs)+' stored stereo pairs · '+fmt(a.saved_payload_mib)+' MiB saved · heartbeat '+fmt(a.heartbeat_age_seconds)+' seconds old at publication';return p;}));
+byId('enduranceMemory').textContent=s.capture_process_rss_mib==null?'Capture memory measurement pending.':'Capture process RSS sum: '+fmt(s.capture_process_rss_mib)+' MiB (diagnostic estimate).';
+byId('enduranceFreshness').textContent='Snapshot published '+new Date(snap.generated_utc).toLocaleString()+'. Source read '+new Date(s.source_observed_utc).toLocaleString()+'. Updates about every five minutes while the laptop publisher has internet.';
+byId('enduranceNext').textContent=s.native_slam_started?'Native SLAM stage has started; interpret only available validated results.':s.algorithm_replays_queued?'Input recording stage active; native replay jobs are queued.':'Native SLAM has not started on this endurance input. Input validation and frozen replay jobs remain next; replays are not automatically queued yet.';
+const table=document.createElement('table');for(const [key,val]of Object.entries(s.run_settings)){const tr=document.createElement('tr');for(const text of [key.replaceAll('_',' '),Array.isArray(val)?val.join(', '):val]){const td=document.createElement('td');td.textContent=text;tr.append(td);}table.append(tr);}byId('enduranceSettings').replaceChildren(table);
+const svg=byId('endurancePlot'),points=s.progress_history||[];svg.replaceChildren();if(points.length){const poly=document.createElementNS('http://www.w3.org/2000/svg','polyline');poly.setAttribute('points',points.map((p,i)=>(20+600*i/Math.max(1,points.length-1))+','+(140-120*Math.min(1,p.simulation_seconds/s.duration_seconds))).join(' '));poly.setAttribute('fill','none');poly.setAttribute('stroke','#14766e');poly.setAttribute('stroke-width','3');svg.append(poly);}
+}catch(e){byId('enduranceStatus').textContent='Current progress unavailable. Last values may be stale.';}}
+byId('downloadEndurance').addEventListener('click',()=>{if(!lastCurrent)return;const url=URL.createObjectURL(new Blob([JSON.stringify(lastCurrent,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='endurance-progress.json';a.click();URL.revokeObjectURL(url);});current();setInterval(current,60000);
+})();
