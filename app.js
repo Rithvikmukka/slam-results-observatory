@@ -250,7 +250,7 @@ refresh();setInterval(()=>{if(!document.hidden)refresh();},60000);
 // Current-stage public projection. No private backend URLs or configuration values.
 (function(){
 let lastCurrent=null;const byId=id=>document.getElementById(id),fmt=n=>Number(n).toLocaleString(undefined,{maximumFractionDigits:1});
-async function current(){try{const snap=await loadSharedSnapshot(),s=snap.current_endurance;if(!s){byId('enduranceStatus').textContent='Current-run snapshot not published yet.';return;}lastCurrent=s;
+async function current(){try{const snap=await loadSharedSnapshot(),s=snap.current_endurance;if(!s){byId('enduranceStatus').textContent='No active benchmark is being published. The recent run was cancelled and its progress data removed; the completed study below is historical.';return;}lastCurrent=s;
 const age=Math.max(0,(Date.now()-Date.parse(snap.generated_utc))/1000);byId('enduranceStatus').textContent=s.label+(age>900?' · publication stale':'');byId('enduranceProgress').value=s.progress_fraction;byId('enduranceTime').textContent=fmt(s.recorded_simulation_seconds/60)+' / '+fmt(s.duration_seconds/60)+' simulated minutes';
 byId('enduranceAgents').replaceChildren(...s.agents.map(a=>{const p=document.createElement('p');p.textContent=a.label+': '+fmt(a.stored_stereo_pairs)+' stored stereo pairs · '+fmt(a.saved_payload_mib)+' MiB saved · heartbeat '+fmt(a.heartbeat_age_seconds)+' seconds old at publication';return p;}));
 byId('enduranceMemory').textContent=s.capture_process_rss_mib==null?'Capture memory measurement pending.':'Capture process RSS sum: '+fmt(s.capture_process_rss_mib)+' MiB (diagnostic estimate).';
